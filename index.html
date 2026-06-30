@@ -200,13 +200,13 @@ textarea{resize:vertical;min-height:78px}
 <main class="view on" id="view-form">
 
   <!-- EmailJS config notice -->
-  <div class="setup-banner" id="email-banner">
+  <div class="setup-banner" id="email-banner" style="display:none">
     <strong>📧 Configuración de correo requerida</strong>
     Para enviar correos, ingresa tus credenciales de EmailJS abajo. Es gratis en <a href="https://emailjs.com" target="_blank">emailjs.com</a> (200 correos/mes).
   </div>
 
   <!-- EmailJS keys -->
-  <div class="card" id="email-config-card">
+  <div class="card" id="email-config-card" style="display:none">
     <div class="card-head"><div class="step s-sky">✉</div><span class="card-title">Configuración de Correo (EmailJS)</span></div>
     <div class="card-body">
       <div class="g3">
@@ -348,6 +348,7 @@ textarea{resize:vertical;min-height:78px}
   <div class="toolbar">
     <input type="text" placeholder="Buscar por reporte, parte, auditor..." oninput="filterRecs(this.value)">
     <button class="btn-export" onclick="exportCSV()">⬇ CSV</button>
+    <button class="btn-export" style="background:var(--red)" onclick="confirmDeleteAll()">🗑 Borrar todo</button>
   </div>
   <div id="rec-list"></div>
 </main>
@@ -564,8 +565,19 @@ textarea{resize:vertical;min-height:78px}
 <script>
 // ─── EmailJS init ──────────────────────────────────────────────────────────────
 (function(){
-  const saved = getSavedConfig();
-  if(saved.pubkey) emailjs.init(saved.pubkey);
+  // ─── CONFIGURA TUS CREDENCIALES DE EMAILJS AQUÍ ───────────────────────────
+  // Reemplaza los valores entre comillas con los de tu cuenta EmailJS:
+  const EJS_PUBKEY   = 'DzfcEWiBsQb1cHq5k';   // Public Key de EmailJS
+  const EJS_SERVICE  = 'service_hgn8n9j';   // Service ID (ej: service_abc123)
+  const EJS_TEMPLATE = 'template_3rhzn9o';  // Template ID (ej: template_xyz789)
+  // ──────────────────────────────────────────────────────────────────────────
+
+  if(EJS_PUBKEY && !EJS_PUBKEY.includes('AQUI')){
+    emailjs.init(EJS_PUBKEY);
+    localStorage.setItem('ejs_pk', EJS_PUBKEY);
+    localStorage.setItem('ejs_svc', EJS_SERVICE);
+    localStorage.setItem('ejs_tpl', EJS_TEMPLATE);
+  }
 })();
 
 function getSavedConfig(){
@@ -652,7 +664,29 @@ const DEFECTS = {
 
 let selDefects = new Map(); // label -> sev
 let photos = [];
-let records = JSON.parse(localStorage.getItem('valeo_rechazos') || '[]');
+let records = [];
+
+// ─── STORAGE COMPARTIDO ────────────────────────────────────────────────────────
+const STORAGE_KEY = 'valeo_rechazos';
+
+async function loadRecords(){
+  try {
+    const result = await window.storage.get(STORAGE_KEY, true);
+    records = result ? JSON.parse(result.value) : [];
+  } catch(e) {
+    records = [];
+  }
+  updateCounter();
+  return records;
+}
+
+async function saveRecords(){
+  try {
+    await window.storage.set(STORAGE_KEY, JSON.stringify(records), true);
+  } catch(e) {
+    console.error('Error guardando registros:', e);
+  }
+}
 
 // ─── BUILD CHIPS ───────────────────────────────────────────────────────────────
 function buildChips(group, containerId){
@@ -706,10 +740,10 @@ function updateSeverity(){
 }
 
 // ─── INIT ──────────────────────────────────────────────────────────────────────
-window.onload = ()=>{
+window.onload = async ()=>{
   document.getElementById('fecha').value = new Date().toISOString().split('T')[0];
+  await loadRecords();
   document.getElementById('reporte').value = genID();
-  updateCounter();
   setupDrop();
 };
 
@@ -728,7 +762,9 @@ function showTab(t){
     const v = document.getElementById('view-'+id);
     v.classList.toggle('on', id===t);
   });
-  if(t==='hist') renderRecs();
+  if(t==='hist'){
+    loadRecords().then(()=>renderRecs());
+  }
 }
 
 // ─── PHOTOS ───────────────────────────────────────────────────────────────────
@@ -793,7 +829,7 @@ async function submitForm(){
     defectos: defList, severidad, fotos: [...photos], ts: new Date().toISOString() };
 
   records.unshift(rec);
-  localStorage.setItem('valeo_rechazos', JSON.stringify(records));
+  await saveRecords();
   updateCounter();
 
   // ── EMAIL ──
@@ -876,6 +912,7 @@ function renderRecs(filter=''){
         <div style="display:flex;align-items:center;gap:8px">
           <span class="badge ${bc[r.severidad]||'b-green'}">${r.severidad}</span>
           <span class="rec-meta">${r.fecha} · ${r.turno.split(' ')[0]}</span>
+          <button onclick="deleteRecord('${r.id}')" style="background:var(--red);color:#fff;border:none;border-radius:4px;padding:3px 8px;cursor:pointer;font-size:11px">🗑</button>
         </div>
       </div>
       <div class="rec-body">
@@ -899,6 +936,23 @@ function updateCounter(){
   const el = document.getElementById('counter');
   el.style.display = records.length ? 'inline-flex' : 'none';
   el.textContent = records.length;
+}
+async function deleteRecord(id){
+  if(!confirm(`¿Eliminar el registro ${id}?`)) return;
+  records = records.filter(r=>r.id !== id);
+  await saveRecords();
+  updateCounter();
+  renderRecs();
+  toast(`Registro ${id} eliminado.`);
+}
+async function confirmDeleteAll(){
+  if(!records.length){ toast('No hay registros para eliminar.',true); return; }
+  if(!confirm(`¿Eliminar TODOS los ${records.length} registros? Esta acción no se puede deshacer.`)) return;
+  records = [];
+  await saveRecords();
+  updateCounter();
+  renderRecs();
+  toast('Todos los registros han sido eliminados.');
 }
 
 // ─── CSV ──────────────────────────────────────────────────────────────────────
