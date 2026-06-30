@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Registro de Rechazo – Valeo CIM</title>
 <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
 
@@ -198,6 +200,12 @@ textarea{resize:vertical;min-height:78px}
 
 <!-- ═══════════════════ FORM ═══════════════════ -->
 <main class="view on" id="view-form">
+
+  <!-- Firebase config notice (almacenamiento compartido de registros) -->
+  <div class="setup-banner" id="fb-banner" style="display:none">
+    <strong>🗄 Configuración de base de datos requerida</strong>
+    Para que el historial se guarde y se comparta entre todos los auditores, configura Firebase. Es gratis en <a href="https://console.firebase.google.com" target="_blank">console.firebase.google.com</a>. Edita la constante <code>FIREBASE_CONFIG</code> al inicio del &lt;script&gt; del archivo con tus credenciales (instrucciones en los comentarios del código).
+  </div>
 
   <!-- EmailJS config notice -->
   <div class="setup-banner" id="email-banner" style="display:none">
@@ -663,29 +671,89 @@ const DEFECTS = {
 };
 
 let selDefects = new Map(); // label -> sev
-let photos = [];
+let photos = [];       // fotos completas (para guardar/ver en historial)
+let photosEmail = [];  // miniaturas pequeñas (solo para el correo)
 let records = [];
 
-// ─── STORAGE COMPARTIDO ────────────────────────────────────────────────────────
-const STORAGE_KEY = 'valeo_rechazos';
+// ─── STORAGE COMPARTIDO (Firebase Firestore) ───────────────────────────────────
+// IMPORTANTE: window.storage SOLO funciona dentro de Claude.ai (artifacts).
+// En GitHub Pages u otro hosting no existe, por eso usamos Firestore: una base
+// de datos en la nube, gratuita, compartida entre todos los que abran la página.
+//
+// CÓMO CONFIGURARLO (una sola vez):
+// 1. Ve a https://console.firebase.google.com → "Agregar proyecto" (gratis, sin tarjeta).
+// 2. En el menú izquierdo: Compilación → Firestore Database → "Crear base de datos"
+//    (elige modo de producción o prueba, da igual, ajustamos las reglas después).
+// 3. En Firestore → pestaña "Reglas", pega esto y publica:
+//      rules_version = '2';
+//      service cloud.firestore {
+//        match /databases/{database}/documents {
+//          match /rechazos/{doc} { allow read, write: if true; }
+//        }
+//      }
+//    (Nota: esto deja la colección abierta a quien tenga el link de tu app;
+//    suficiente para una herramienta interna, pero no pongas datos sensibles.)
+// 4. Configuración del proyecto (ícono engrane) → General → baja hasta "Tus apps"
+//    → ícono "</>" para agregar una app web → copia el objeto firebaseConfig.
+// 5. Pega esos valores reemplazando los "TU_..." de abajo.
+const FIREBASE_CONFIG = {
+  apiKey:            "AIzaSyBgOHhYOpXWASgpmQE80NmC50N9320X5BQ",
+  authDomain:        "valeo-rechazos.firebaseapp.com",
+  projectId:         "valeo-rechazos",
+  storageBucket:      "valeo-rechazos.firebasestorage.app",
+  messagingSenderId: "88028553008",
+  appId:             "1:88028553008:web:ce8fe29a46ed68bb51f2f5"
+};
+
+let db = null;
+function initFirebase(){
+  if(!FIREBASE_CONFIG.apiKey || FIREBASE_CONFIG.apiKey.includes('TU_')){
+    return false;
+  }
+  try {
+    if(!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
+    db = firebase.firestore();
+    return true;
+  } catch(e){
+    console.error('Error inicializando Firebase:', e);
+    return false;
+  }
+}
+
+function checkFirebaseBanner(){
+  const banner = document.getElementById('fb-banner');
+  if(!banner) return;
+  banner.style.display = db ? 'none' : 'block';
+}
 
 async function loadRecords(){
+  if(!db){
+    records = [];
+    updateCounter();
+    return records;
+  }
   try {
-    const result = await window.storage.get(STORAGE_KEY, true);
-    records = result ? JSON.parse(result.value) : [];
-  } catch(e) {
+    const snap = await db.collection('rechazos').orderBy('ts','desc').get();
+    records = snap.docs.map(d=>d.data());
+  } catch(e){
+    console.error('Error cargando registros:', e);
+    toast('✗ No se pudieron cargar los registros: ' + e.message, true);
     records = [];
   }
   updateCounter();
   return records;
 }
 
-async function saveRecords(){
-  try {
-    await window.storage.set(STORAGE_KEY, JSON.stringify(records), true);
-  } catch(e) {
-    console.error('Error guardando registros:', e);
+async function saveRecord(rec){
+  if(!db){
+    throw new Error('Firebase no está configurado. Revisa FIREBASE_CONFIG en el código del archivo.');
   }
+  await db.collection('rechazos').doc(rec.id).set(rec);
+}
+
+async function deleteRecordStorage(id){
+  if(!db) return;
+  await db.collection('rechazos').doc(id).delete();
 }
 
 // ─── BUILD CHIPS ───────────────────────────────────────────────────────────────
@@ -742,6 +810,8 @@ function updateSeverity(){
 // ─── INIT ──────────────────────────────────────────────────────────────────────
 window.onload = async ()=>{
   document.getElementById('fecha').value = new Date().toISOString().split('T')[0];
+  initFirebase();
+  checkFirebaseBanner();
   await loadRecords();
   document.getElementById('reporte').value = genID();
   setupDrop();
@@ -768,19 +838,31 @@ function showTab(t){
 }
 
 // ─── PHOTOS ───────────────────────────────────────────────────────────────────
+function resizeToDataURL(img, maxW, quality){
+  let w = img.width, h = img.height;
+  if(w > maxW){ h = Math.round(h*maxW/w); w = maxW; }
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+  return canvas.toDataURL('image/jpeg', quality);
+}
+
+const MAX_FOTOS = 4; // límite de fotos por reporte: Firestore permite máx. 1MB por documento
+
 function handleFiles(files){
+  if(photos.length >= MAX_FOTOS){
+    toast(`⚠ Máximo ${MAX_FOTOS} fotos por reporte.`, true);
+    return;
+  }
   Array.from(files).forEach(f=>{
-    // resize to max 800px wide for email
+    if(photos.length >= MAX_FOTOS) return;
     const img = new Image();
     const url = URL.createObjectURL(f);
     img.onload = ()=>{
-      const MAX = 800;
-      let w = img.width, h = img.height;
-      if(w > MAX){ h = Math.round(h*MAX/w); w = MAX; }
-      const canvas = document.createElement('canvas');
-      canvas.width = w; canvas.height = h;
-      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-      photos.push(canvas.toDataURL('image/jpeg', 0.75));
+      // versión completa, para guardar y ver en el historial
+      photos.push(resizeToDataURL(img, 500, 0.6));
+      // miniatura muy ligera, solo para incrustar en el correo
+      photosEmail.push(resizeToDataURL(img, 320, 0.45));
       URL.revokeObjectURL(url);
       renderThumbs();
     };
@@ -797,7 +879,7 @@ function renderThumbs(){
     c.appendChild(d);
   });
 }
-function removePhoto(i){ photos.splice(i,1); renderThumbs(); }
+function removePhoto(i){ photos.splice(i,1); photosEmail.splice(i,1); renderThumbs(); }
 function setupDrop(){
   const z = document.getElementById('drop');
   z.addEventListener('dragover', e=>{ e.preventDefault(); z.classList.add('over'); });
@@ -806,6 +888,32 @@ function setupDrop(){
 }
 
 // ─── SUBMIT ───────────────────────────────────────────────────────────────────
+// Presupuesto de tamaño para las fotos incrustadas en el correo. EmailJS limita
+// el tamaño total de la solicitud (en el plan gratuito, ~50KB). Dejamos margen
+// para los demás campos del template.
+const EMAIL_FOTOS_BUDGET = 35000; // bytes aprox.
+
+function buildFotosHTML(thumbs){
+  if(!thumbs.length) return '(Sin fotos adjuntas)';
+  let html = '';
+  let total = 0;
+  let incluidas = 0;
+  for(const p of thumbs){
+    if(total + p.length > EMAIL_FOTOS_BUDGET) break;
+    html += `<img src="${p}" style="max-width:160px;margin:4px;border-radius:4px;" alt="Foto ${incluidas+1}">`;
+    total += p.length;
+    incluidas++;
+  }
+  const restantes = thumbs.length - incluidas;
+  if(incluidas === 0){
+    return `(${thumbs.length} foto(s) adjunta(s) en la app — no se incluyeron en el correo por límite de tamaño. Consulta el historial.)`;
+  }
+  if(restantes > 0){
+    html += `<p style="font-size:12px;color:#666;margin-top:6px">+ ${restantes} foto(s) más disponibles en el historial de la app.</p>`;
+  }
+  return html;
+}
+
 async function submitForm(){
   const fecha    = document.getElementById('fecha').value;
   const turno    = document.getElementById('turno').value;
@@ -828,18 +936,23 @@ async function submitForm(){
   const rec = { id, fecha, turno, auditor, operador, parte, factura, cantidad, obs,
     defectos: defList, severidad, fotos: [...photos], ts: new Date().toISOString() };
 
-  records.unshift(rec);
-  await saveRecords();
-  updateCounter();
+  setLoading(true);
+
+  try {
+    await saveRecord(rec);
+    records.unshift(rec);
+    updateCounter();
+  } catch(e){
+    console.error('Error guardando registro:', e);
+    setLoading(false);
+    toast('✗ No se pudo guardar el registro: ' + (e.message || e), true);
+    return; // no continuar si ni siquiera se pudo guardar
+  }
 
   // ── EMAIL ──
   const cfg = getSavedConfig();
   if(cfg.pubkey && cfg.service && cfg.template){
-    setLoading(true);
-    // Build fotos HTML for email
-    const fotosHTML = photos.length
-      ? photos.map((p,i)=>`<img src="${p}" style="max-width:200px;margin:4px;border-radius:4px;" alt="Foto ${i+1}">`).join('')
-      : '(Sin fotos adjuntas)';
+    const fotosHTML = buildFotosHTML(photosEmail);
 
     const params = {
       to_email:    'juan.blanco@cartonsultana.com.mx',
@@ -858,12 +971,13 @@ async function submitForm(){
       toast(`✓ Rechazo ${id} registrado y correo enviado.`);
     } catch(e){
       console.error(e);
-      toast('✓ Rechazo guardado. Error al enviar correo: ' + (e.text||e.message), true);
+      const msg = (e && (e.text || e.message)) || 'desconocido';
+      toast(`✓ Rechazo ${id} guardado. Error al enviar correo (${msg}).`, true);
     }
-    setLoading(false);
   } else {
     toast(`✓ Rechazo ${id} guardado. Configura EmailJS para enviar correos.`);
   }
+  setLoading(false);
   resetForm();
 }
 
@@ -887,6 +1001,7 @@ function resetForm(){
   document.querySelectorAll('.def-chip').forEach(c=>c.classList.remove('sel'));
   document.querySelectorAll('.dot').forEach(d=>d.style.background='');
   photos = [];
+  photosEmail = [];
   document.getElementById('thumbs').innerHTML='';
   updateSeverity();
 }
@@ -939,20 +1054,34 @@ function updateCounter(){
 }
 async function deleteRecord(id){
   if(!confirm(`¿Eliminar el registro ${id}?`)) return;
-  records = records.filter(r=>r.id !== id);
-  await saveRecords();
-  updateCounter();
-  renderRecs();
-  toast(`Registro ${id} eliminado.`);
+  try {
+    await deleteRecordStorage(id);
+    records = records.filter(r=>r.id !== id);
+    updateCounter();
+    renderRecs();
+    toast(`Registro ${id} eliminado.`);
+  } catch(e){
+    console.error(e);
+    toast('✗ No se pudo eliminar el registro: ' + (e.message || e), true);
+  }
 }
 async function confirmDeleteAll(){
   if(!records.length){ toast('No hay registros para eliminar.',true); return; }
   if(!confirm(`¿Eliminar TODOS los ${records.length} registros? Esta acción no se puede deshacer.`)) return;
-  records = [];
-  await saveRecords();
-  updateCounter();
-  renderRecs();
-  toast('Todos los registros han sido eliminados.');
+  try {
+    for(const r of records){
+      await deleteRecordStorage(r.id);
+    }
+    records = [];
+    updateCounter();
+    renderRecs();
+    toast('Todos los registros han sido eliminados.');
+  } catch(e){
+    console.error(e);
+    toast('✗ Ocurrió un error eliminando algunos registros.', true);
+    await loadRecords();
+    renderRecs();
+  }
 }
 
 // ─── CSV ──────────────────────────────────────────────────────────────────────
