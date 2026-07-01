@@ -818,9 +818,14 @@ window.onload = async ()=>{
 };
 
 function genID(){
+  // Se arma con fecha + hora exacta + un código aleatorio para garantizar que
+  // sea único incluso si dos auditores registran un rechazo al mismo tiempo
+  // desde dispositivos distintos (usar records.length causaba folios
+  // duplicados que se sobrescribían entre sí en la base de datos).
   const d = new Date();
   const p = n=>String(n).padStart(2,'0');
-  return `REC-${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${String(records.length+1).padStart(4,'0')}`;
+  const rand = Math.random().toString(36).slice(2,6).toUpperCase();
+  return `REC-${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-${rand}`;
 }
 
 // ─── TABS ──────────────────────────────────────────────────────────────────────
