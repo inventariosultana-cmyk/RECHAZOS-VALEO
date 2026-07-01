@@ -84,11 +84,13 @@ textarea{resize:vertical;min-height:78px}
 .sev-hint{font-size:11px;color:var(--mid);margin-top:6px;font-style:italic}
 
 /* ── PHOTO ── */
-.drop{border:2px dashed var(--faint);border-radius:var(--r);padding:26px;text-align:center;cursor:pointer;background:var(--bg);position:relative;transition:all .15s}
-.drop:hover,.drop.over{border-color:var(--green);background:var(--green-l)}
+.drop{border:2px dashed var(--faint);border-radius:var(--r);padding:26px;text-align:center;background:var(--bg);position:relative;transition:all .15s}
+.drop.over{border-color:var(--green);background:var(--green-l)}
 .drop-input-hidden{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;left:-9999px}
 .drop p{font-size:13px;color:var(--mid)}
 .drop strong{color:var(--green)}
+.btn-photo{background:#fff;border:1.5px solid var(--green);color:var(--green);border-radius:8px;padding:9px 16px;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
+.btn-photo:hover{background:var(--green);color:#fff}
 .thumbs{display:flex;flex-wrap:wrap;gap:9px;margin-top:12px}
 .thumb{position:relative;width:86px;height:86px;border-radius:6px;overflow:hidden;border:1px solid var(--faint)}
 .thumb img{width:100%;height:100%;object-fit:cover}
@@ -336,9 +338,14 @@ textarea{resize:vertical;min-height:78px}
     <div class="card-head"><div class="step s-amber">4</div><span class="card-title">Evidencia Fotográfica</span></div>
     <div class="card-body">
       <input type="file" accept="image/*" multiple id="file-in" class="drop-input-hidden" onchange="handleFiles(this.files)">
-      <div class="drop" id="drop" onclick="document.getElementById('file-in').click()">
-        <p>📷 <strong>Toca para agregar fotos</strong> o arrastra imágenes aquí</p>
+      <input type="file" accept="image/*" capture="environment" id="camera-in" class="drop-input-hidden" onchange="handleFiles(this.files); this.value='';">
+      <div class="drop" id="drop">
+        <p>📷 <strong>Agrega fotos del defecto</strong></p>
         <p style="font-size:11px;margin-top:3px">JPG, PNG – varias a la vez</p>
+        <div style="display:flex;gap:10px;justify-content:center;margin-top:10px;flex-wrap:wrap">
+          <button type="button" class="btn-photo" onclick="document.getElementById('camera-in').click()">📸 Tomar foto</button>
+          <button type="button" class="btn-photo" onclick="document.getElementById('file-in').click()">🖼️ Elegir de galería</button>
+        </div>
       </div>
       <div class="thumbs" id="thumbs"></div>
     </div>
@@ -1057,8 +1064,26 @@ function updateCounter(){
   el.style.display = records.length ? 'inline-flex' : 'none';
   el.textContent = records.length;
 }
+// ─── PROTECCIÓN PARA ELIMINAR REGISTROS ────────────────────────────────────────
+// Solo quien conozca esta contraseña (definida en el código, editable aquí)
+// puede borrar registros. No es cifrado fuerte -- cualquiera con acceso al
+// código fuente podría verla -- pero evita borrados accidentales o de gente
+// sin autorización usando la app normalmente.
+const DELETE_PASSWORD = '021175';
+
+function checkDeletePassword(){
+  const pass = prompt('🔒 Ingresa la contraseña para eliminar registros:');
+  if(pass === null) return false; // canceló
+  if(pass !== DELETE_PASSWORD){
+    toast('✗ Contraseña incorrecta. No se eliminó el registro.', true);
+    return false;
+  }
+  return true;
+}
+
 async function deleteRecord(id){
   if(!confirm(`¿Eliminar el registro ${id}?`)) return;
+  if(!checkDeletePassword()) return;
   try {
     await deleteRecordStorage(id);
     records = records.filter(r=>r.id !== id);
@@ -1073,6 +1098,7 @@ async function deleteRecord(id){
 async function confirmDeleteAll(){
   if(!records.length){ toast('No hay registros para eliminar.',true); return; }
   if(!confirm(`¿Eliminar TODOS los ${records.length} registros? Esta acción no se puede deshacer.`)) return;
+  if(!checkDeletePassword()) return;
   try {
     for(const r of records){
       await deleteRecordStorage(r.id);
