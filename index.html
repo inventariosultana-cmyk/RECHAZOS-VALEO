@@ -7,6 +7,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
 
@@ -198,6 +199,7 @@ textarea{resize:vertical;min-height:78px}
   <div class="tab on" onclick="showTab('form')">Nuevo Rechazo</div>
   <div class="tab" onclick="showTab('hist')">Historial <span class="nbadge" id="counter" style="display:none"></span></div>
   <div class="tab" onclick="showTab('cat')">Catálogo de Defectos</div>
+  <div class="tab" onclick="showTab('charts')">📊 Gráficas</div>
 </nav>
 
 <!-- ═══════════════════ FORM ═══════════════════ -->
@@ -575,6 +577,52 @@ textarea{resize:vertical;min-height:78px}
 
   </main>
 
+<!-- ═══════════════════ GRÁFICAS ═══════════════════ -->
+<main class="view" id="view-charts">
+  <div class="card">
+    <div class="card-head"><div class="step s-amber">📊</div><span class="card-title">Análisis de Rechazos</span></div>
+    <div class="card-body">
+      <div class="field" style="max-width:260px">
+        <label>Periodo a mostrar</label>
+        <select id="chart-weeks" onchange="renderCharts()">
+          <option value="4" selected>Últimas 4 semanas</option>
+          <option value="8">Últimas 8 semanas</option>
+          <option value="12">Últimas 12 semanas</option>
+          <option value="26">Últimas 26 semanas</option>
+          <option value="all">Todo el historial</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><div class="step s-amber">1</div><span class="card-title">Rechazos por Semana</span></div>
+    <div class="card-body">
+      <div style="position:relative;height:280px">
+        <canvas id="chart-weekly"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><div class="step s-amber">2</div><span class="card-title">Motivos de Rechazo (Defectos)</span></div>
+    <div class="card-body">
+      <div style="position:relative;height:320px">
+        <canvas id="chart-defects"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><div class="step s-amber">3</div><span class="card-title">Distribución por Severidad</span></div>
+    <div class="card-body">
+      <div style="position:relative;height:260px;max-width:340px;margin:0 auto">
+        <canvas id="chart-severity"></canvas>
+      </div>
+    </div>
+  </div>
+</main>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -838,14 +886,17 @@ function genID(){
 // ─── TABS ──────────────────────────────────────────────────────────────────────
 function showTab(t){
   document.querySelectorAll('.tab').forEach((el,i)=>{
-    el.classList.toggle('on', (['form','hist','cat'][i])===t);
+    el.classList.toggle('on', (['form','hist','cat','charts'][i])===t);
   });
-  ['form','hist','cat'].forEach(id=>{
+  ['form','hist','cat','charts'].forEach(id=>{
     const v = document.getElementById('view-'+id);
     v.classList.toggle('on', id===t);
   });
   if(t==='hist'){
     loadRecords().then(()=>renderRecs());
+  }
+  if(t==='charts'){
+    loadRecords().then(()=>renderCharts());
   }
 }
 
@@ -1137,6 +1188,267 @@ function toast(msg, err=false){
   t.style.background = err ? 'var(--red)' : 'var(--green)';
   t.classList.add('show');
   setTimeout(()=>t.classList.remove('show'), 4000);
+}
+
+// ─── GRÁFICAS ─────────────────────────────────────────────────────────────────
+let chartWeekly = null, chartDefects = null, chartSeverity = null;
+
+// Lunes de la semana que contiene "date"
+function getMonday(date){
+  const d = new Date(date);
+  const day = d.getDay(); // 0=domingo ... 6=sábado
+  const diff = (day === 0 ? -6 : 1 - day);
+  d.setDate(d.getDate() + diff);
+  d.setHours(0,0,0,0);
+  return d;
+}
+const MESES = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+function weekRangeLabel(monday, sunday){
+  const mismoMes = monday.getMonth() === sunday.getMonth();
+  const rango = mismoMes
+    ? `${monday.getDate()}–${sunday.getDate()} ${MESES[monday.getMonth()]}`
+    : `${monday.getDate()} ${MESES[monday.getMonth()]}–${sunday.getDate()} ${MESES[sunday.getMonth()]}`;
+  return `${rango} · Sem ${getISOWeek(monday)}`;
+}
+// Número de semana ISO 8601 (semana fiscal): la semana 1 es la que contiene
+// el primer jueves del año; las semanas van de lunes a domingo.
+function getISOWeek(date){
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNum = d.getUTCDay() || 7; // domingo=7 en vez de 0
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum); // mover al jueves de esa semana
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  return Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+}
+
+// Arma la lista de semanas (lunes a domingo) del periodo pedido, incluyendo
+// las semanas SIN rechazos con conteo 0, y agrega los rechazos de "records"
+// a la semana que les corresponde según su campo "fecha".
+function buildWeeklyBuckets(weeksCount){
+  const today = new Date();
+  const thisMonday = getMonday(today);
+
+  let startMonday;
+  if(weeksCount === 'all'){
+    if(!records.length){
+      startMonday = thisMonday;
+    } else {
+      const fechas = records.map(r=> getMonday(new Date(r.fecha + 'T00:00:00')).getTime());
+      startMonday = new Date(Math.min(...fechas, thisMonday.getTime()));
+    }
+  } else {
+    startMonday = new Date(thisMonday);
+    startMonday.setDate(startMonday.getDate() - (Number(weeksCount)-1)*7);
+  }
+
+  const weeks = [];
+  let cursor = new Date(startMonday);
+  while(cursor <= thisMonday){
+    const monday = new Date(cursor);
+    const sunday = new Date(cursor); sunday.setDate(sunday.getDate()+6); sunday.setHours(23,59,59,999);
+    weeks.push({ monday, sunday, count:0, defects:{}, severidad:{Mayor:0, Menor:0} });
+    cursor.setDate(cursor.getDate()+7);
+  }
+
+  records.forEach(r=>{
+    if(!r.fecha) return;
+    const d = new Date(r.fecha + 'T00:00:00');
+    const wk = weeks.find(w=> d >= w.monday && d <= w.sunday);
+    if(!wk) return; // fuera del rango seleccionado
+    wk.count++;
+    (r.defectos||[]).forEach(def=>{ wk.defects[def] = (wk.defects[def]||0) + 1; });
+    const sev = r.severidad || 'Menor';
+    wk.severidad[sev] = (wk.severidad[sev]||0) + 1;
+  });
+
+  return weeks;
+}
+
+function renderCharts(){
+  if(typeof Chart === 'undefined'){
+    toast('✗ No se pudo cargar la librería de gráficas (revisa tu conexión a internet).', true);
+    return;
+  }
+  const weeksSel = document.getElementById('chart-weeks').value;
+  const weeks = buildWeeklyBuckets(weeksSel === 'all' ? 'all' : Number(weeksSel));
+
+  Chart.defaults.font.family = "'Inter', sans-serif";
+  Chart.defaults.color = '#6b7280';
+
+  // Plugin ligero para mostrar el valor encima de cada barra (mejora lectura
+  // sin depender de librerías externas).
+  const valueLabelPlugin = {
+    id: 'valueLabel',
+    afterDatasetsDraw(chart){
+      const {ctx} = chart;
+      chart.data.datasets.forEach((ds, i)=>{
+        const meta = chart.getDatasetMeta(i);
+        if(meta.hidden) return;
+        ctx.save();
+        ctx.font = '600 11px Inter, sans-serif';
+        ctx.fillStyle = '#374151';
+        meta.data.forEach((bar, idx)=>{
+          const val = ds.data[idx];
+          const isHorizontal = chart.options.indexAxis === 'y';
+          ctx.textAlign = isHorizontal ? 'left' : 'center';
+          ctx.textBaseline = 'middle';
+          if(isHorizontal){
+            ctx.fillText(val, bar.x + 6, bar.y);
+          } else {
+            ctx.fillText(val, bar.x, bar.y - 10);
+          }
+        });
+        ctx.restore();
+      });
+    }
+  };
+
+  // ── 1. Rechazos por semana ──
+  // Etiquetas en dos líneas (rango de fechas / número de semana) para que no
+  // se amontonen aunque se muestren muchas semanas.
+  const labels = weeks.map(w => {
+    const full = weekRangeLabel(w.monday, w.sunday); // "22–28 jun · Sem 26"
+    const [rango, sem] = full.split(' · ');
+    return [rango, sem];
+  });
+  const counts = weeks.map(w => w.count);
+  const manyWeeks = weeks.length > 10;
+
+  if(chartWeekly) chartWeekly.destroy();
+  chartWeekly = new Chart(document.getElementById('chart-weekly'), {
+    type: 'bar',
+    plugins: [valueLabelPlugin],
+    data: {
+      labels,
+      datasets: [{
+        label: 'Rechazos',
+        data: counts,
+        backgroundColor: counts.map(c => c===0 ? '#c8e6c9' : '#2e7d32'),
+        hoverBackgroundColor: counts.map(c => c===0 ? '#a5d6a7' : '#1b5e20'),
+        borderRadius: 6,
+        maxBarThickness: 46,
+        barPercentage: manyWeeks ? 0.85 : 0.55,
+        categoryPercentage: manyWeeks ? 0.9 : 0.7
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      layout: { padding: { top: 18 } },
+      plugins: {
+        legend: { display:false },
+        tooltip: {
+          backgroundColor: '#1f2937', padding: 10, cornerRadius: 8, displayColors: false,
+          callbacks: { label: ctx => ctx.raw===0 ? '0 rechazos ✓' : `${ctx.raw} rechazo(s)` }
+        }
+      },
+      scales: {
+        y: { beginAtZero:true, ticks:{ precision:0, font:{size:11} }, grid:{ color:'#eef0f2', drawBorder:false } },
+        x: { ticks:{ font:{size: manyWeeks?9:11}, maxRotation:0, minRotation:0, autoSkip:true }, grid:{ display:false } }
+      }
+    }
+  });
+
+  // ── 2. Motivos de rechazo (defectos), acumulados en el periodo ──
+  const defTotals = {};
+  weeks.forEach(w=> Object.entries(w.defects).forEach(([def,n])=>{
+    defTotals[def] = (defTotals[def]||0) + n;
+  }));
+  const defEntries = Object.entries(defTotals).sort((a,b)=> b[1]-a[1]);
+
+  // Mapa etiqueta -> severidad, para colorear cada barra según su gravedad
+  const sevByLabel = {};
+  Object.values(DEFECTS).flat().forEach(d=> sevByLabel[d.label] = d.sev);
+
+  const defWrap = document.getElementById('chart-defects').parentElement;
+  if(!defEntries.length){
+    defWrap.innerHTML = '<p style="font-size:13px;color:var(--mid);text-align:center;padding:50px 0">No hay defectos registrados en este periodo. 🎉</p>';
+  } else {
+    if(!document.getElementById('chart-defects')){
+      defWrap.innerHTML = '<canvas id="chart-defects"></canvas>';
+    }
+    // Altura dinámica según cantidad de motivos, para que no se aprieten
+    defWrap.style.height = Math.min(560, Math.max(220, defEntries.length*38 + 40)) + 'px';
+
+    if(chartDefects) chartDefects.destroy();
+    chartDefects = new Chart(document.getElementById('chart-defects'), {
+      type: 'bar',
+      plugins: [valueLabelPlugin],
+      data: {
+        labels: defEntries.map(e=>e[0]),
+        datasets: [{
+          label: 'Ocurrencias',
+          data: defEntries.map(e=>e[1]),
+          backgroundColor: defEntries.map(e => sevByLabel[e[0]]==='Mayor' ? '#e65100' : '#43a047'),
+          hoverBackgroundColor: defEntries.map(e => sevByLabel[e[0]]==='Mayor' ? '#bf360c' : '#2e7d32'),
+          borderRadius: 6,
+          maxBarThickness: 26
+        }]
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true, maintainAspectRatio: false,
+        layout: { padding: { right: 26 } },
+        plugins: {
+          legend: { display:false },
+          tooltip: {
+            backgroundColor: '#1f2937', padding: 10, cornerRadius: 8, displayColors: false,
+            callbacks: {
+              label: ctx => `${ctx.raw} ocurrencia(s) · ${sevByLabel[ctx.label] || ''}`
+            }
+          }
+        },
+        scales: {
+          x: { beginAtZero:true, ticks:{ precision:0, font:{size:11} }, grid:{ color:'#eef0f2', drawBorder:false } },
+          y: { ticks:{ font:{size:11}, autoSkip:false }, grid:{ display:false } }
+        }
+      }
+    });
+  }
+
+  // ── 3. Distribución por severidad ──
+  const sevTotals = { Mayor:0, Menor:0 };
+  weeks.forEach(w=> Object.entries(w.severidad).forEach(([s,n])=>{
+    if(sevTotals[s]===undefined) sevTotals[s]=0;
+    sevTotals[s]+=n;
+  }));
+  const sevWrap = document.getElementById('chart-severity').parentElement;
+  const sevTotal = Object.values(sevTotals).reduce((a,b)=>a+b,0);
+  if(!sevTotal){
+    sevWrap.innerHTML = '<p style="font-size:13px;color:var(--mid);text-align:center;padding:40px 0">Sin rechazos en este periodo. 🎉</p>';
+  } else {
+    if(!document.getElementById('chart-severity')){
+      sevWrap.innerHTML = '<canvas id="chart-severity"></canvas>';
+    }
+    if(chartSeverity) chartSeverity.destroy();
+    chartSeverity = new Chart(document.getElementById('chart-severity'), {
+      type: 'doughnut',
+      data: {
+        labels: Object.keys(sevTotals),
+        datasets: [{
+          data: Object.values(sevTotals),
+          backgroundColor: ['#e65100','#43a047'],
+          borderColor: '#fff',
+          borderWidth: 3,
+          hoverOffset: 6
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        cutout: '62%',
+        plugins: {
+          legend: { position:'bottom', labels:{ usePointStyle:true, pointStyle:'circle', padding:16, font:{size:12} } },
+          tooltip: {
+            backgroundColor: '#1f2937', padding: 10, cornerRadius: 8, displayColors: false,
+            callbacks: {
+              label: ctx => {
+                const pct = sevTotal ? Math.round(ctx.raw/sevTotal*100) : 0;
+                return `${ctx.label}: ${ctx.raw} (${pct}%)`;
+              }
+            }
+          }
+        }
+      }
+    });
+  }
 }
 </script>
 </body>
