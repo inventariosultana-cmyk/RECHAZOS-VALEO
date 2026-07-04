@@ -605,22 +605,15 @@ textarea{resize:vertical;min-height:78px}
   </div>
 
   <div class="card">
-    <div class="card-head"><div class="step s-amber">2</div><span class="card-title">Motivos de Rechazo (Defectos)</span></div>
+    <div class="card-head"><div class="step s-amber">2</div><span class="card-title">Motivos de Rechazo Más Comunes</span></div>
     <div class="card-body">
-      <div style="position:relative;height:320px">
+      <div id="defects-wrap" style="position:relative;height:320px">
         <canvas id="chart-defects"></canvas>
+        <p id="defects-empty" style="display:none;font-size:13px;color:var(--mid);text-align:center;padding:50px 0">No hay defectos registrados en este periodo. 🎉</p>
       </div>
     </div>
   </div>
 
-  <div class="card">
-    <div class="card-head"><div class="step s-amber">3</div><span class="card-title">Distribución por Severidad</span></div>
-    <div class="card-body">
-      <div style="position:relative;height:260px;max-width:340px;margin:0 auto">
-        <canvas id="chart-severity"></canvas>
-      </div>
-    </div>
-  </div>
 </main>
 
 <div class="toast" id="toast"></div>
@@ -1191,7 +1184,7 @@ function toast(msg, err=false){
 }
 
 // ─── GRÁFICAS ─────────────────────────────────────────────────────────────────
-let chartWeekly = null, chartDefects = null, chartSeverity = null;
+let chartWeekly = null, chartDefects = null;
 
 // Lunes de la semana que contiene "date"
 function getMonday(date){
@@ -1255,9 +1248,13 @@ function buildWeeklyBuckets(weeksCount){
     const wk = weeks.find(w=> d >= w.monday && d <= w.sunday);
     if(!wk) return; // fuera del rango seleccionado
     wk.count++;
-    (r.defectos||[]).forEach(def=>{ wk.defects[def] = (wk.defects[def]||0) + 1; });
+    // Si el rechazo tiene cantidad > 1, cada motivo representa esa cantidad
+    // de piezas rechazadas, no un solo rechazo.
+    const cant = parseInt(r.cantidad, 10);
+    const peso = (Number.isFinite(cant) && cant > 0) ? cant : 1;
+    (r.defectos||[]).forEach(def=>{ wk.defects[def] = (wk.defects[def]||0) + peso; });
     const sev = r.severidad || 'Menor';
-    wk.severidad[sev] = (wk.severidad[sev]||0) + 1;
+    wk.severidad[sev] = (wk.severidad[sev]||0) + peso;
   });
 
   return weeks;
@@ -1322,8 +1319,8 @@ function renderCharts(){
       datasets: [{
         label: 'Rechazos',
         data: counts,
-        backgroundColor: counts.map(c => c===0 ? '#c8e6c9' : '#2e7d32'),
-        hoverBackgroundColor: counts.map(c => c===0 ? '#a5d6a7' : '#1b5e20'),
+        backgroundColor: counts.map(c => c===0 ? '#c8e6c9' : '#1a1a1a'),
+        hoverBackgroundColor: counts.map(c => c===0 ? '#a5d6a7' : '#000000'),
         borderRadius: 6,
         maxBarThickness: 46,
         barPercentage: manyWeeks ? 0.85 : 0.55,
@@ -1347,38 +1344,46 @@ function renderCharts(){
     }
   });
 
-  // ── 2. Motivos de rechazo (defectos), acumulados en el periodo ──
+  // ── 2. Motivos de rechazo más comunes (histograma) ──
   const defTotals = {};
   weeks.forEach(w=> Object.entries(w.defects).forEach(([def,n])=>{
     defTotals[def] = (defTotals[def]||0) + n;
   }));
   const defEntries = Object.entries(defTotals).sort((a,b)=> b[1]-a[1]);
 
-  // Mapa etiqueta -> severidad, para colorear cada barra según su gravedad
-  const sevByLabel = {};
-  Object.values(DEFECTS).flat().forEach(d=> sevByLabel[d.label] = d.sev);
+  const canvasDef = document.getElementById('chart-defects');
+  const emptyDef  = document.getElementById('defects-empty');
+  const wrapDef   = document.getElementById('defects-wrap');
 
-  const defWrap = document.getElementById('chart-defects').parentElement;
   if(!defEntries.length){
-    defWrap.innerHTML = '<p style="font-size:13px;color:var(--mid);text-align:center;padding:50px 0">No hay defectos registrados en este periodo. 🎉</p>';
+    if(chartDefects){ chartDefects.destroy(); chartDefects = null; }
+    canvasDef.style.display = 'none';
+    emptyDef.style.display = 'block';
   } else {
-    if(!document.getElementById('chart-defects')){
-      defWrap.innerHTML = '<canvas id="chart-defects"></canvas>';
-    }
+    emptyDef.style.display = 'none';
+    canvasDef.style.display = 'block';
     // Altura dinámica según cantidad de motivos, para que no se aprieten
-    defWrap.style.height = Math.min(560, Math.max(220, defEntries.length*38 + 40)) + 'px';
+    wrapDef.style.height = Math.min(560, Math.max(220, defEntries.length*38 + 40)) + 'px';
 
     if(chartDefects) chartDefects.destroy();
-    chartDefects = new Chart(document.getElementById('chart-defects'), {
+    // Paleta amplia y variada para que cada motivo tenga su propio color
+    // (solo se repite si hay más motivos que colores disponibles).
+    const PALETTE = [
+      '#e65100','#1565c0','#6a1b9a','#2e7d32','#ad1457',
+      '#00838f','#f9a825','#4527a0','#c62828','#00695c',
+      '#5d4037','#283593','#9e9d24','#d84315','#37474f'
+    ];
+    const barColors = defEntries.map((_,i)=> PALETTE[i % PALETTE.length]);
+
+    chartDefects = new Chart(canvasDef, {
       type: 'bar',
       plugins: [valueLabelPlugin],
       data: {
         labels: defEntries.map(e=>e[0]),
         datasets: [{
-          label: 'Ocurrencias',
+          label: 'Piezas rechazadas',
           data: defEntries.map(e=>e[1]),
-          backgroundColor: defEntries.map(e => sevByLabel[e[0]]==='Mayor' ? '#e65100' : '#43a047'),
-          hoverBackgroundColor: defEntries.map(e => sevByLabel[e[0]]==='Mayor' ? '#bf360c' : '#2e7d32'),
+          backgroundColor: barColors,
           borderRadius: 6,
           maxBarThickness: 26
         }]
@@ -1391,60 +1396,12 @@ function renderCharts(){
           legend: { display:false },
           tooltip: {
             backgroundColor: '#1f2937', padding: 10, cornerRadius: 8, displayColors: false,
-            callbacks: {
-              label: ctx => `${ctx.raw} ocurrencia(s) · ${sevByLabel[ctx.label] || ''}`
-            }
+            callbacks: { label: ctx => `${ctx.raw} pieza(s) rechazada(s)` }
           }
         },
         scales: {
           x: { beginAtZero:true, ticks:{ precision:0, font:{size:11} }, grid:{ color:'#eef0f2', drawBorder:false } },
           y: { ticks:{ font:{size:11}, autoSkip:false }, grid:{ display:false } }
-        }
-      }
-    });
-  }
-
-  // ── 3. Distribución por severidad ──
-  const sevTotals = { Mayor:0, Menor:0 };
-  weeks.forEach(w=> Object.entries(w.severidad).forEach(([s,n])=>{
-    if(sevTotals[s]===undefined) sevTotals[s]=0;
-    sevTotals[s]+=n;
-  }));
-  const sevWrap = document.getElementById('chart-severity').parentElement;
-  const sevTotal = Object.values(sevTotals).reduce((a,b)=>a+b,0);
-  if(!sevTotal){
-    sevWrap.innerHTML = '<p style="font-size:13px;color:var(--mid);text-align:center;padding:40px 0">Sin rechazos en este periodo. 🎉</p>';
-  } else {
-    if(!document.getElementById('chart-severity')){
-      sevWrap.innerHTML = '<canvas id="chart-severity"></canvas>';
-    }
-    if(chartSeverity) chartSeverity.destroy();
-    chartSeverity = new Chart(document.getElementById('chart-severity'), {
-      type: 'doughnut',
-      data: {
-        labels: Object.keys(sevTotals),
-        datasets: [{
-          data: Object.values(sevTotals),
-          backgroundColor: ['#e65100','#43a047'],
-          borderColor: '#fff',
-          borderWidth: 3,
-          hoverOffset: 6
-        }]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        cutout: '62%',
-        plugins: {
-          legend: { position:'bottom', labels:{ usePointStyle:true, pointStyle:'circle', padding:16, font:{size:12} } },
-          tooltip: {
-            backgroundColor: '#1f2937', padding: 10, cornerRadius: 8, displayColors: false,
-            callbacks: {
-              label: ctx => {
-                const pct = sevTotal ? Math.round(ctx.raw/sevTotal*100) : 0;
-                return `${ctx.label}: ${ctx.raw} (${pct}%)`;
-              }
-            }
-          }
         }
       }
     });
